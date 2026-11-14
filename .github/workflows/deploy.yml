@@ -1,0 +1,154 @@
+# Builds and publishes https://spherex-blink.github.io/
+#   app   (hourly + manual): latest web app from the project repo + the cached sky index
+#   index (daily + manual) : also refresh the sky index from NASA/IRSA (new SPHEREx data arrives weekly)
+#   full  (manual)         : rebuild the index metadata from scratch (~30 min of IRSA queries)
+# The project repo is private; it is checked out with a read-only deploy key (secret PRIVATE_REPO_SSH_KEY).
+name: Build and deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "app | index | full"
+        type: choice
+        options: [app, index, full]
+        default: app
+  schedule:
+    - cron: "17 * * * *"    # hourly: pick up new app commits
+    - cron: "41 2 * * *"    # daily 02:41 UTC: refresh the sky index from NASA
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Decide mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then m="${{ inputs.mode }}";
+          elif [ "${{ github.event.schedule }}" = "41 2 * * *" ]; then m=index; else m=app; fi
+          echo "mode=$m" >> "$GITHUB_OUTPUT"; echo "Mode: $m"
+
+      - name: Check out the project (read-only key)
+        uses: actions/checkout@v4
+        with:
+          repository: danielturg/halal-haemek-spherex
+          ssh-key: ${{ secrets.PRIVATE_REPO_SSH_KEY }}
+          path: project
+
+      - name: Restore cached metadata
+        uses: actions/cache/restore@v4
+        with:
+          path: project/data/index/obscore
+          key: obscore-${{ github.run_id }}
+          restore-keys: obscore-
+
+      - name: Restore cached sky index
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            project/data/index/sky
+            project/data/index/s3_keys.parquet
+          key: sky-${{ github.run_id }}
+          restore-keys: sky-
+
+      - name: Seed from the release if the caches are empty
+        id: seed
+        working-directory: project
+        run: |
+          mkdir -p data/index
+          if ! ls data/index/obscore/*.parquet >/dev/null 2>&1; then
+            gh release download seed --repo "${{ github.repository }}" -p obscore.tar.gz -D /tmp && tar -xzf /tmp/obscore.tar.gz -C data/index
+          fi
+          if [ ! -f data/index/sky/meta.json ]; then
+            gh release download seed --repo "${{ github.repository }}" -p sky.tar.gz -p s3_keys.parquet -D /tmp
+            tar -xzf /tmp/sky.tar.gz -C data/index && cp /tmp/s3_keys.parquet data/index/
+            echo "seeded=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "chunks: $(ls data/index/obscore | wc -l), index cells: $(ls data/index/sky/o5 | wc -l)"
+
+      - name: Set up Python
+        if: steps.mode.outputs.mode != 'app'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Refresh the sky index from NASA
+        if: steps.mode.outputs.mode != 'app'
+        working-directory: project
+        run: |
+          pip install --quiet numpy astropy astroquery pyarrow astropy-healpix requests
+          if [ "${{ steps.mode.outputs.mode }}" = "full" ]; then rm -rf data/index/obscore; fi
+          python -m pipeline.index.harvest_obscore --all --threads 8 --no-check --refresh-days 75
+          python -m pipeline.index.s3_keys --all
+          python -m pipeline.index.build_index --order 5
+          python - <<'EOF'
+          import json, pyarrow.parquet as pq
+          m = json.load(open("data/index/sky/meta.json"))
+          s3 = pq.read_metadata("data/index/s3_keys.parquet").num_rows
+          print(f"index {m['n_exposures']:,} exposures, S3 {s3:,} files, keys: {m['keys']}, data as of MJD {m['data_as_of_mjd']}")
+          # new files can appear in S3 a little before TAP lists them (or vice versa): allow a small difference
+          assert abs(m["n_exposures"] - s3) <= 0.01 * s3, "index and S3 listing disagree by more than 1%"
+          assert m["keys"].startswith("0 ") or int(m["keys"].split()[0]) <= 0.01 * s3, "too many exposures without an S3 key"
+          EOF
+
+      - name: Save metadata cache
+        if: steps.mode.outputs.mode != 'app' || steps.seed.outputs.seeded == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: project/data/index/obscore
+          key: obscore-${{ github.run_id }}
+
+      - name: Save sky index cache
+        if: steps.mode.outputs.mode != 'app' || steps.seed.outputs.seeded == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            project/data/index/sky
+            project/data/index/s3_keys.parquet
+          key: sky-${{ github.run_id }}
+
+      - name: Assemble the site
+        run: |
+          mkdir -p _site
+          if [ -d project/web ]; then cp -r project/web/. _site/; fi
+          cp -r project/data/index/sky _site/index
+          touch _site/.nojekyll
+          if [ ! -f _site/index.html ]; then
+            cat > _site/index.html <<'HTML'
+          <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>SPHEREx Blink</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 16px;background:#0c1016;color:#e5e9f0}a{color:#82a0ff}code{background:#1b2645;padding:1px 5px;border-radius:4px}</style></head>
+          <body><h1>SPHEREx Blink</h1><p>Blink NASA SPHEREx infrared images of any point in the sky to spot moving and varying objects.
+          NASA Space Apps Challenge 2026 &middot; team Halal Haemek (Haifa).</p><p><b>The app is under construction.</b> The sky index is live:
+          <a href="index/meta.json">index/meta.json</a>.</p><p id="s"></p>
+          <script>fetch("index/meta.json").then(r=>r.json()).then(m=>{document.getElementById("s").textContent=
+          m.n_exposures.toLocaleString()+" SPHEREx exposures indexed, data as of MJD "+m.data_as_of_mjd+"."})</script></body></html>
+          HTML
+          fi
+          ( cd project && echo "{\"commit\":\"$(git rev-parse --short HEAD)\",\"built_utc\":\"$(date -u +%FT%TZ)\",\"mode\":\"${{ steps.mode.outputs.mode }}\"}" ) > _site/build.json
+          du -sh _site; find _site -type f | wc -l
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
