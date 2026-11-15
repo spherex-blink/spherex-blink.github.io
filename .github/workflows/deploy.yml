@@ -1,5 +1,5 @@
 # Builds and publishes https://spherex-blink.github.io/
-#   app   (hourly + manual): latest web app from the project repo + the cached sky index
+#   app   (manual; hourly paused 15.11): latest web app from the project repo + the cached sky index
 #   index (daily + manual) : also refresh the sky index from NASA/IRSA (new SPHEREx data arrives weekly)
 #   full  (manual)         : rebuild the index metadata from scratch (~30 min of IRSA queries)
 # The project repo is private; it is checked out with a read-only deploy key (secret PRIVATE_REPO_SSH_KEY).
@@ -14,7 +14,7 @@ on:
         options: [app, index, full]
         default: app
   schedule:
-    - cron: "17 * * * *"    # hourly: pick up new app commits
+    # - cron: "17 * * * *"  # hourly app deploy PAUSED 15.11 (team leader): deploy manually (Actions > Build and deploy > Run workflow)
     - cron: "41 2 * * *"    # daily 02:41 UTC: refresh the sky index from NASA
 
 permissions:
