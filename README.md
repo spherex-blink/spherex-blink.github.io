@@ -11,7 +11,7 @@ How it works:
 - **The browser reads only the pixels it needs** straight from NASA's public SPHEREx archive on AWS (`nasa-irsa-spherex`).
 - **The index refreshes daily**, so new SPHEREx data appears automatically.
 
-This repository only publishes the site. Source code: to be linked when the project repository is made public.
+This repository only publishes the site. **Source code, docs and the 30-second demo video: https://github.com/spherex-blink/spherex-blink**
 
 Data: SPHEREx spectral images from NASA/IPAC IRSA. SPHEREx is a joint project of the Jet Propulsion Laboratory and the
 California Institute of Technology, funded by NASA. Built with the help of Claude Code (AI-assisted development).
